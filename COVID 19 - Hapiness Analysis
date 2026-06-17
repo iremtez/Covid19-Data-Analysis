@@ -23,9 +23,6 @@ COVID_PATH = BASE_DIR / "covid19_Confirmed_dataset.csv"
 HAPPINESS_PATH = BASE_DIR / "worldwide_happiness_report.csv"
 
 
-# =========================================================
-# Task 1: Importing COVID19 dataset and preparing it
-# =========================================================
 def load_datasets():
     if not COVID_PATH.exists():
         raise FileNotFoundError(f"COVID dataset not found: {COVID_PATH}")
@@ -37,27 +34,22 @@ def load_datasets():
     return covid, happiness
 
 
-def prepare_covid_dataset(covid):
+def prepare_covid_data(covid):
     metadata_columns = {"Province/State", "Country/Region", "Lat", "Long"}
     date_columns = [
-        col
-        for col in covid.columns
-        if col not in metadata_columns
-        and not pd.isna(pd.to_datetime(col, format="%m/%d/%y", errors="coerce"))
+        column
+        for column in covid.columns
+        if column not in metadata_columns
+        and not pd.isna(pd.to_datetime(column, format="%m/%d/%y", errors="coerce"))
     ]
+
     covid_by_country = (
         covid.drop(columns=["Lat", "Long"], errors="ignore")
         .groupby("Country/Region", as_index=True)[date_columns]
         .sum()
         .sort_index()
     )
-    return covid_by_country
 
-
-# =========================================================
-# Task 2: Deciding on and calculating a good measure
-# =========================================================
-def calculate_covid_measures(covid_by_country):
     daily_increase = covid_by_country.diff(axis=1).fillna(0)
     covid_summary = pd.DataFrame(
         {
@@ -69,7 +61,8 @@ def calculate_covid_measures(covid_by_country):
             ),
         }
     )
-    return covid_summary
+
+    return covid_by_country, covid_summary
 
 
 def prepare_happiness_data(happiness):
@@ -89,10 +82,7 @@ def prepare_happiness_data(happiness):
     return happiness_clean
 
 
-# =========================================================
-# Task 3: Merging two datasets and finding correlations
-# =========================================================
-def merge_datasets(covid_summary, happiness_clean):
+def merge_analysis_data(covid_summary, happiness_clean):
     merged = covid_summary.merge(happiness_clean, on="country", how="inner")
     merged["log_max_infection_rate"] = np.log(merged["max_infection_rate"].clip(lower=0) + 1)
     return merged.sort_values("max_infection_rate", ascending=False)
@@ -108,6 +98,7 @@ def build_correlations(merged):
         "generosity",
         "perceptions_of_corruption",
     ]
+
     correlations = (
         merged[["max_infection_rate", "log_max_infection_rate", *metrics]]
         .corr(numeric_only=True)
@@ -118,9 +109,35 @@ def build_correlations(merged):
     return correlations
 
 
-# =========================================================
-# Task 4: Visualizing analysis results
-# =========================================================
+def plot_regression(merged, column, label):
+    plt.figure(figsize=(9, 5))
+
+    if sns is not None:
+        sns.regplot(
+            data=merged,
+            x=column,
+            y="log_max_infection_rate",
+            scatter_kws={"alpha": 0.7, "s": 48},
+            line_kws={"color": "#B23A48", "linewidth": 2},
+        )
+    else:
+        x = merged[column]
+        y = merged["log_max_infection_rate"]
+        plt.scatter(x, y, alpha=0.7, s=48, color="#4C78A8")
+        if x.nunique() > 1:
+            slope, intercept = np.polyfit(x, y, 1)
+            x_line = np.linspace(x.min(), x.max(), 100)
+            plt.plot(x_line, slope * x_line + intercept, color="#B23A48", linewidth=2)
+
+    plt.title(f"{label} vs. log(max infection rate)")
+    plt.xlabel(label)
+    plt.ylabel("log(max daily confirmed increase + 1)")
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / f"{column}_vs_log_max_infection_rate.png", dpi=160)
+    plt.close()
+
+
 def save_outputs(covid_by_country, covid_summary, happiness_clean, merged, correlations):
     OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -140,30 +157,7 @@ def save_outputs(covid_by_country, covid_summary, happiness_clean, merged, corre
     ]
 
     for column, label in plot_specs:
-        plt.figure(figsize=(9, 5))
-        if sns is not None:
-            sns.regplot(
-                data=merged,
-                x=column,
-                y="log_max_infection_rate",
-                scatter_kws={"alpha": 0.7, "s": 48},
-                line_kws={"color": "#B23A48", "linewidth": 2},
-            )
-        else:
-            x = merged[column]
-            y = merged["log_max_infection_rate"]
-            plt.scatter(x, y, alpha=0.7, s=48, color="#4C78A8")
-            if x.nunique() > 1:
-                slope, intercept = np.polyfit(x, y, 1)
-                x_line = np.linspace(x.min(), x.max(), 100)
-                plt.plot(x_line, slope * x_line + intercept, color="#B23A48", linewidth=2)
-        plt.title(f"{label} vs. log(max infection rate)")
-        plt.xlabel(label)
-        plt.ylabel("log(max daily confirmed increase + 1)")
-        plt.grid(alpha=0.25)
-        plt.tight_layout()
-        plt.savefig(OUTPUT_DIR / f"{column}_vs_log_max_infection_rate.png", dpi=160)
-        plt.close()
+        plot_regression(merged, column, label)
 
     plt.figure(figsize=(10, 6))
     top_15 = merged.head(15).sort_values("max_infection_rate")
@@ -215,10 +209,9 @@ def print_summary(covid, happiness, merged, correlations, excel_path):
 
 def main():
     covid, happiness = load_datasets()
-    covid_by_country = prepare_covid_dataset(covid)
-    covid_summary = calculate_covid_measures(covid_by_country)
+    covid_by_country, covid_summary = prepare_covid_data(covid)
     happiness_clean = prepare_happiness_data(happiness)
-    merged = merge_datasets(covid_summary, happiness_clean)
+    merged = merge_analysis_data(covid_summary, happiness_clean)
     correlations = build_correlations(merged)
     excel_path = save_outputs(covid_by_country, covid_summary, happiness_clean, merged, correlations)
     print_summary(covid, happiness, merged, correlations, excel_path)
