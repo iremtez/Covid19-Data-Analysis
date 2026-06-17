@@ -1,0 +1,228 @@
+import os
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+
+BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = BASE_DIR / "Output"
+MPL_CONFIG_DIR = BASE_DIR / ".matplotlib"
+MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
+
+import matplotlib.pyplot as plt
+
+try:
+    import seaborn as sns
+except ModuleNotFoundError:
+    sns = None
+
+
+COVID_PATH = BASE_DIR / "covid19_Confirmed_dataset.csv"
+HAPPINESS_PATH = BASE_DIR / "worldwide_happiness_report.csv"
+
+
+# =========================================================
+# Task 1: Importing COVID19 dataset and preparing it
+# =========================================================
+def load_datasets():
+    if not COVID_PATH.exists():
+        raise FileNotFoundError(f"COVID dataset not found: {COVID_PATH}")
+    if not HAPPINESS_PATH.exists():
+        raise FileNotFoundError(f"Happiness dataset not found: {HAPPINESS_PATH}")
+
+    covid = pd.read_csv(COVID_PATH)
+    happiness = pd.read_csv(HAPPINESS_PATH)
+    return covid, happiness
+
+
+def prepare_covid_dataset(covid):
+    metadata_columns = {"Province/State", "Country/Region", "Lat", "Long"}
+    date_columns = [
+        col
+        for col in covid.columns
+        if col not in metadata_columns
+        and not pd.isna(pd.to_datetime(col, format="%m/%d/%y", errors="coerce"))
+    ]
+    covid_by_country = (
+        covid.drop(columns=["Lat", "Long"], errors="ignore")
+        .groupby("Country/Region", as_index=True)[date_columns]
+        .sum()
+        .sort_index()
+    )
+    return covid_by_country
+
+
+# =========================================================
+# Task 2: Deciding on and calculating a good measure
+# =========================================================
+def calculate_covid_measures(covid_by_country):
+    daily_increase = covid_by_country.diff(axis=1).fillna(0)
+    covid_summary = pd.DataFrame(
+        {
+            "country": covid_by_country.index,
+            "total_confirmed_last_day": covid_by_country.iloc[:, -1].values,
+            "max_infection_rate": daily_increase.max(axis=1).values,
+            "first_confirmed_date": covid_by_country.gt(0).idxmax(axis=1).where(
+                covid_by_country.gt(0).any(axis=1)
+            ),
+        }
+    )
+    return covid_summary
+
+
+def prepare_happiness_data(happiness):
+    happiness_clean = happiness.rename(
+        columns={
+            "Country or region": "country",
+            "Overall rank": "overall_rank",
+            "Score": "happiness_score",
+            "GDP per capita": "gdp_per_capita",
+            "Social support": "social_support",
+            "Healthy life expectancy": "healthy_life_expectancy",
+            "Freedom to make life choices": "freedom_to_make_life_choices",
+            "Generosity": "generosity",
+            "Perceptions of corruption": "perceptions_of_corruption",
+        }
+    )
+    return happiness_clean
+
+
+# =========================================================
+# Task 3: Merging two datasets and finding correlations
+# =========================================================
+def merge_datasets(covid_summary, happiness_clean):
+    merged = covid_summary.merge(happiness_clean, on="country", how="inner")
+    merged["log_max_infection_rate"] = np.log(merged["max_infection_rate"].clip(lower=0) + 1)
+    return merged.sort_values("max_infection_rate", ascending=False)
+
+
+def build_correlations(merged):
+    metrics = [
+        "happiness_score",
+        "gdp_per_capita",
+        "social_support",
+        "healthy_life_expectancy",
+        "freedom_to_make_life_choices",
+        "generosity",
+        "perceptions_of_corruption",
+    ]
+    correlations = (
+        merged[["max_infection_rate", "log_max_infection_rate", *metrics]]
+        .corr(numeric_only=True)
+        .loc[["max_infection_rate", "log_max_infection_rate"], metrics]
+        .T
+        .sort_values("log_max_infection_rate", ascending=False)
+    )
+    return correlations
+
+
+# =========================================================
+# Task 4: Visualizing analysis results
+# =========================================================
+def save_outputs(covid_by_country, covid_summary, happiness_clean, merged, correlations):
+    OUTPUT_DIR.mkdir(exist_ok=True)
+
+    excel_path = OUTPUT_DIR / "covid_happiness_analysis.xlsx"
+    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+        covid_by_country.to_excel(writer, sheet_name="covid_by_country")
+        covid_summary.to_excel(writer, sheet_name="covid_summary", index=False)
+        happiness_clean.to_excel(writer, sheet_name="happiness", index=False)
+        merged.to_excel(writer, sheet_name="merged_analysis", index=False)
+        correlations.to_excel(writer, sheet_name="correlations")
+
+    plot_specs = [
+        ("happiness_score", "Happiness score"),
+        ("gdp_per_capita", "GDP per capita"),
+        ("social_support", "Social support"),
+        ("healthy_life_expectancy", "Healthy life expectancy"),
+    ]
+
+    for column, label in plot_specs:
+        plt.figure(figsize=(9, 5))
+        if sns is not None:
+            sns.regplot(
+                data=merged,
+                x=column,
+                y="log_max_infection_rate",
+                scatter_kws={"alpha": 0.7, "s": 48},
+                line_kws={"color": "#B23A48", "linewidth": 2},
+            )
+        else:
+            x = merged[column]
+            y = merged["log_max_infection_rate"]
+            plt.scatter(x, y, alpha=0.7, s=48, color="#4C78A8")
+            if x.nunique() > 1:
+                slope, intercept = np.polyfit(x, y, 1)
+                x_line = np.linspace(x.min(), x.max(), 100)
+                plt.plot(x_line, slope * x_line + intercept, color="#B23A48", linewidth=2)
+        plt.title(f"{label} vs. log(max infection rate)")
+        plt.xlabel(label)
+        plt.ylabel("log(max daily confirmed increase + 1)")
+        plt.grid(alpha=0.25)
+        plt.tight_layout()
+        plt.savefig(OUTPUT_DIR / f"{column}_vs_log_max_infection_rate.png", dpi=160)
+        plt.close()
+
+    plt.figure(figsize=(10, 6))
+    top_15 = merged.head(15).sort_values("max_infection_rate")
+    if sns is not None:
+        sns.barplot(data=top_15, x="max_infection_rate", y="country", color="#4C78A8")
+    else:
+        plt.barh(top_15["country"], top_15["max_infection_rate"], color="#4C78A8")
+    plt.title("Top 15 countries by max daily confirmed increase")
+    plt.xlabel("Max daily confirmed increase")
+    plt.ylabel("")
+    plt.grid(axis="x", alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "top_15_max_infection_rate.png", dpi=160)
+    plt.close()
+
+    return excel_path
+
+
+def print_summary(covid, happiness, merged, correlations, excel_path):
+    print("COVID dataset shape:", covid.shape)
+    print("Happiness dataset shape:", happiness.shape)
+    print("Merged country count:", len(merged))
+    print()
+
+    print("Top 10 countries by max infection rate:")
+    print(
+        merged[
+            [
+                "country",
+                "max_infection_rate",
+                "total_confirmed_last_day",
+                "happiness_score",
+                "gdp_per_capita",
+                "social_support",
+            ]
+        ]
+        .head(10)
+        .to_string(index=False)
+    )
+    print()
+
+    print("Correlation with COVID max infection metrics:")
+    print(correlations.round(3).to_string())
+    print()
+
+    print(f"Outputs saved to: {excel_path}")
+    print(f"Charts saved under: {OUTPUT_DIR}")
+
+
+def main():
+    covid, happiness = load_datasets()
+    covid_by_country = prepare_covid_dataset(covid)
+    covid_summary = calculate_covid_measures(covid_by_country)
+    happiness_clean = prepare_happiness_data(happiness)
+    merged = merge_datasets(covid_summary, happiness_clean)
+    correlations = build_correlations(merged)
+    excel_path = save_outputs(covid_by_country, covid_summary, happiness_clean, merged, correlations)
+    print_summary(covid, happiness, merged, correlations, excel_path)
+
+
+if __name__ == "__main__":
+    main()
