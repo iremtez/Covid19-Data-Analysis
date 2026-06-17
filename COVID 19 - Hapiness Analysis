@@ -7,9 +7,15 @@ import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "Output"
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 MPL_CONFIG_DIR = BASE_DIR / ".matplotlib"
-MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+MPL_CONFIG_DIR.mkdir(exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
+
+import matplotlib
+
+matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
@@ -19,18 +25,40 @@ except ModuleNotFoundError:
     sns = None
 
 
-COVID_PATH = BASE_DIR / "covid19_Confirmed_dataset.csv"
-HAPPINESS_PATH = BASE_DIR / "worldwide_happiness_report.csv"
+COVID_FILE_CANDIDATES = [
+    BASE_DIR / "Datasets" / "covid19_Confirmed_dataset.csv",
+    BASE_DIR / "Datasets" / "Covid19_Confirmed_dataset.csv",
+]
+
+HAPPINESS_FILE_CANDIDATES = [
+
+    BASE_DIR / "Dataset" / "worldwide_happiness_report.csv",
+    BASE_DIR / "Dataset" / "WorldHappinessReport.csv",
+
+]
+
+
+def find_existing_file(candidates, label):
+    for path in candidates:
+        if path.exists():
+            return path
+
+    candidate_text = "\n".join(str(path) for path in candidates)
+    raise FileNotFoundError(
+        f"{label} file could not be found. Checked these paths:\n{candidate_text}"
+    )
 
 
 def load_datasets():
-    if not COVID_PATH.exists():
-        raise FileNotFoundError(f"COVID dataset not found: {COVID_PATH}")
-    if not HAPPINESS_PATH.exists():
-        raise FileNotFoundError(f"Happiness dataset not found: {HAPPINESS_PATH}")
+    covid_path = find_existing_file(COVID_FILE_CANDIDATES, "COVID-19 confirmed dataset")
+    happiness_path = find_existing_file(HAPPINESS_FILE_CANDIDATES, "World happiness dataset")
 
-    covid = pd.read_csv(COVID_PATH)
-    happiness = pd.read_csv(HAPPINESS_PATH)
+    covid = pd.read_csv(covid_path)
+    happiness = pd.read_csv(happiness_path)
+
+    print(f"COVID file loaded from: {covid_path}")
+    print(f"Happiness file loaded from: {happiness_path}")
+
     return covid, happiness
 
 
@@ -79,6 +107,21 @@ def prepare_happiness_data(happiness):
             "Perceptions of corruption": "perceptions_of_corruption",
         }
     )
+
+    required_columns = [
+        "country",
+        "happiness_score",
+        "gdp_per_capita",
+        "social_support",
+        "healthy_life_expectancy",
+        "freedom_to_make_life_choices",
+        "generosity",
+        "perceptions_of_corruption",
+    ]
+    missing_columns = [column for column in required_columns if column not in happiness_clean.columns]
+    if missing_columns:
+        raise ValueError(f"Missing happiness columns: {missing_columns}")
+
     return happiness_clean
 
 
@@ -107,6 +150,61 @@ def build_correlations(merged):
         .sort_values("log_max_infection_rate", ascending=False)
     )
     return correlations
+
+
+def build_actionable_insights(merged, correlations):
+    top_metric = correlations["log_max_infection_rate"].idxmax()
+    top_metric_corr = correlations.loc[top_metric, "log_max_infection_rate"]
+    top_countries = ", ".join(merged.head(10)["country"].tolist())
+
+    insights = [
+        {
+            "area": "Country prioritization",
+            "insight": "A small group of countries has the highest peak daily confirmed increases.",
+            "evidence": f"Top countries include: {top_countries}.",
+            "action": "Use max_infection_rate to prioritize countries for deeper curve and policy review.",
+        },
+        {
+            "area": "Development indicators",
+            "insight": "Development indicators are positively associated with peak reported infection growth.",
+            "evidence": f"Strongest log-scale correlation is {top_metric}: {top_metric_corr:.3f}.",
+            "action": "Interpret higher peaks together with testing capacity, mobility, urbanization, and reporting quality.",
+        },
+        {
+            "area": "Metric limitation",
+            "insight": "Raw max infection rate is not population adjusted.",
+            "evidence": "The measure is maximum daily confirmed increase, not cases per million.",
+            "action": "Add population data before making fair cross-country operational comparisons.",
+        },
+        {
+            "area": "Monitoring",
+            "insight": "Daily increases are more useful than cumulative totals for short-term monitoring.",
+            "evidence": "max_infection_rate is calculated from daily differences in cumulative cases.",
+            "action": "Track daily increases and rolling averages to detect acceleration earlier.",
+        },
+        {
+            "area": "Causality caution",
+            "insight": "The analysis shows association, not cause and effect.",
+            "evidence": "COVID outcomes are joined with country-level happiness/development indicators.",
+            "action": "Frame results as hypotheses, not causal claims.",
+        },
+    ]
+
+    for _, row in merged.head(5).iterrows():
+        insights.append(
+            {
+                "area": "High-priority country",
+                "insight": f"{row['country']} has one of the highest peak daily increases.",
+                "evidence": (
+                    f"max_infection_rate={row['max_infection_rate']:.0f}; "
+                    f"total_confirmed_last_day={row['total_confirmed_last_day']:.0f}; "
+                    f"happiness_score={row['happiness_score']:.3f}"
+                ),
+                "action": "Review curve shape, reporting changes, and intervention timing before comparison.",
+            }
+        )
+
+    return pd.DataFrame(insights)
 
 
 def plot_regression(merged, column, label):
@@ -138,24 +236,34 @@ def plot_regression(merged, column, label):
     plt.close()
 
 
-def save_outputs(covid_by_country, covid_summary, happiness_clean, merged, correlations):
-    OUTPUT_DIR.mkdir(exist_ok=True)
-
+def save_outputs(covid_by_country, covid_summary, happiness_clean, merged, correlations, insights):
     excel_path = OUTPUT_DIR / "covid_happiness_analysis.xlsx"
+    insights_path = OUTPUT_DIR / "actionable_insights.txt"
+
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
         covid_by_country.to_excel(writer, sheet_name="covid_by_country")
         covid_summary.to_excel(writer, sheet_name="covid_summary", index=False)
         happiness_clean.to_excel(writer, sheet_name="happiness", index=False)
         merged.to_excel(writer, sheet_name="merged_analysis", index=False)
         correlations.to_excel(writer, sheet_name="correlations")
+        insights.to_excel(writer, sheet_name="actionable_insights", index=False)
+
+    with open(insights_path, "w", encoding="utf-8") as file:
+        file.write("Actionable Insights\n")
+        file.write("===================\n\n")
+        for index, row in insights.iterrows():
+            file.write(f"{index + 1}. {row['area']}\n")
+            file.write(f"Insight: {row['insight']}\n")
+            file.write(f"Evidence: {row['evidence']}\n")
+            file.write(f"Action: {row['action']}\n\n")
 
     plot_specs = [
         ("happiness_score", "Happiness score"),
         ("gdp_per_capita", "GDP per capita"),
         ("social_support", "Social support"),
         ("healthy_life_expectancy", "Healthy life expectancy"),
+        ("freedom_to_make_life_choices", "Freedom to make life choices"),
     ]
-
     for column, label in plot_specs:
         plot_regression(merged, column, label)
 
@@ -173,10 +281,10 @@ def save_outputs(covid_by_country, covid_summary, happiness_clean, merged, corre
     plt.savefig(OUTPUT_DIR / "top_15_max_infection_rate.png", dpi=160)
     plt.close()
 
-    return excel_path
+    return excel_path, insights_path
 
 
-def print_summary(covid, happiness, merged, correlations, excel_path):
+def print_summary(covid, happiness, merged, correlations, insights, excel_path, insights_path):
     print("COVID dataset shape:", covid.shape)
     print("Happiness dataset shape:", happiness.shape)
     print("Merged country count:", len(merged))
@@ -203,7 +311,13 @@ def print_summary(covid, happiness, merged, correlations, excel_path):
     print(correlations.round(3).to_string())
     print()
 
-    print(f"Outputs saved to: {excel_path}")
+    print("Actionable insights:")
+    for _, row in insights.head(5).iterrows():
+        print(f"- {row['area']}: {row['action']}")
+    print()
+
+    print(f"Excel output saved to: {excel_path}")
+    print(f"Insights output saved to: {insights_path}")
     print(f"Charts saved under: {OUTPUT_DIR}")
 
 
@@ -213,8 +327,16 @@ def main():
     happiness_clean = prepare_happiness_data(happiness)
     merged = merge_analysis_data(covid_summary, happiness_clean)
     correlations = build_correlations(merged)
-    excel_path = save_outputs(covid_by_country, covid_summary, happiness_clean, merged, correlations)
-    print_summary(covid, happiness, merged, correlations, excel_path)
+    insights = build_actionable_insights(merged, correlations)
+    excel_path, insights_path = save_outputs(
+        covid_by_country,
+        covid_summary,
+        happiness_clean,
+        merged,
+        correlations,
+        insights,
+    )
+    print_summary(covid, happiness, merged, correlations, insights, excel_path, insights_path)
 
 
 if __name__ == "__main__":
